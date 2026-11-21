@@ -6,3 +6,4 @@ dist/
 ffmpeg/
 windows-build/
 streamapp/_build.py
+.DS_Store
