@@ -18,7 +18,36 @@ from streamapp.engine import (MeterParser, build_engine_args, build_relay_args, 
 FF = sys.argv[1] if len(sys.argv) > 1 else "ffmpeg"
 
 
+def check_device_options() -> bool:
+    """Nur Windows: Engine-Befehl für echte Geräte (mit erfundenen Namen) starten.
+
+    Erwartet wird "Gerät nicht gefunden" – aber kein Fehler beim Einlesen der Optionen.
+    """
+    if sys.platform != "win32":
+        return True
+    cfg = AppConfig()
+    cfg.engine.video_device = "Gibt Es Nicht Video"
+    cfg.engine.floor_device = "Gibt Es Nicht Audio 1"
+    cfg.engine.interp_device = "Gibt Es Nicht Audio 2"
+    cfg.engine.video_input_size = "1920x1080"
+    cfg.engine.video_input_fps = "30"
+    res = subprocess.run([FF, *build_engine_args(cfg)], stdin=subprocess.DEVNULL,
+                         capture_output=True, timeout=60)
+    err = res.stderr.decode(errors="replace")
+    bad = [l for l in err.splitlines()
+           if "Error parsing options" in l or "cannot be applied" in l or "Unrecognized option" in l]
+    found = "Could not find" in err or "Gibt Es Nicht" in err
+    print("Geräte-Optionen:", "OK" if not bad and found else "FEHLER")
+    if bad or not found:
+        print(err[-2000:])
+        return False
+    return True
+
+
 def main() -> int:
+    if not check_device_options():
+        print("SMOKE TEST FEHLGESCHLAGEN")
+        return 1
     out = tempfile.mkdtemp()
     cfg = AppConfig()
     cfg.engine.test_mode = True

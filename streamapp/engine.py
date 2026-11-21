@@ -78,7 +78,9 @@ def command_line(target: str, cmd: str, value: str) -> str:
 # --------------------------------------------------------------------------- engine
 
 def _dshow_input(kind: str, device: str, extra: List[str]) -> List[str]:
-    return ["-f", "dshow", "-thread_queue_size", "4096", *extra, "-i", f"{kind}={device}"]
+    # Kein -thread_queue_size: neuere ffmpeg-Versionen kennen die Option nur noch für Ausgänge
+    # und brechen sonst mit "Error parsing options for input file" ab.
+    return ["-f", "dshow", *extra, "-i", f"{kind}={device}"]
 
 
 def _inputs(e: EngineConfig) -> List[str]:
