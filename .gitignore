@@ -5,3 +5,4 @@ dist/
 *.spec
 ffmpeg/
 windows-build/
+streamapp/_build.py

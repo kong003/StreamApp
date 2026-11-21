@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from . import BUILD, __version__
 from . import engine as eng
 from .config import (VOICE_LEFT, VOICE_NONE, VOICE_RIGHT, AppConfig, StreamConfig,
                      save_config)
@@ -810,7 +811,7 @@ class MainWindow(QMainWindow):
     def __init__(self, cfg: AppConfig):
         super().__init__()
         self.cfg = cfg
-        self.setWindowTitle("StreamApp – Mehrsprachiges RTMP-Streaming")
+        self.setWindowTitle(f"StreamApp {__version__} ({BUILD}) – Mehrsprachiges RTMP-Streaming")
         self.resize(1600, 900)
 
         self.engine = EngineProcess(self)
