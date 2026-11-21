@@ -3,7 +3,11 @@ name: Windows-Build
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
+
+permissions:
+  contents: write  # für das Release bei Versions-Tags
 
 jobs:
   build:
@@ -71,3 +75,12 @@ jobs:
           name: StreamApp-windows
           path: ${{ env.APPNAME }}-windows.zip
           retention-days: 30
+
+      - name: Release veröffentlichen (nur bei Tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "Windows-Version zum Herunterladen: ZIP entpacken und StreamApp.exe starten (ffmpeg ist enthalten)."
+          gh release create "${{ github.ref_name }}" "$env:APPNAME-windows.zip" --title "StreamApp ${{ github.ref_name }}" --notes $notes --latest
