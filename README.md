@@ -58,20 +58,26 @@ Eingangspegeln darunter. Jede Stream-Spalte hat drei Fader mit Pegelanzeige:
 
 ### Ducker einstellen
 
+Der Ducker ist **kein Kompressor**: Sobald der Dolmetscher spricht, wird der Saalton um einen
+**festen Wert** leiser – egal wie laut der Dolmetscher ist. „● senkt um … dB“ zeigt an, wann er greift.
+
 | Regler | Wirkung | Startwert |
 |---|---|---|
-| Schwelle | Ab diesem Dolmetscher-Pegel wird der Saalton abgesenkt. Niedriger = reagiert schon auf leise Sprache | −36 dB |
-| Stärke (Ratio) | Wie stark abgesenkt wird (1 = gar nicht, 20 = sehr stark) | 10 : 1 |
-| Attack | Wie schnell abgesenkt wird, wenn der Dolmetscher einsetzt | 20 ms |
+| Absenkung | Um so viele dB wird der Saalton leiser, solange der Dolmetscher spricht | 15 dB |
+| Schwelle | Ab diesem Dolmetscher-Pegel gilt er als „spricht“. Niedriger = reagiert schon auf leise Sprache | −36 dB |
+| Attack | Wie schnell abgesenkt wird, wenn der Dolmetscher einsetzt | 30 ms |
 | Release | Wie schnell der Saalton zurückkommt, wenn der Dolmetscher pausiert | 600 ms |
-| Saalton / Dolmetscher / Summe | Grundpegel der Anteile und des Gesamtmixes | 0 dB |
+| Saal / Dolm. / Summe (Fader) | Grundpegel der Anteile und des Gesamtmixes | 0 dB |
 
 Tipp: Release eher lang (500–1500 ms), damit der Saalton in kurzen Sprechpausen nicht „pumpt“.
-Wenn der Saalton zwischen den Sätzen zu laut zurückkommt: Saalton-Pegel generell etwas senken
-(z.B. −10 dB) und den Ducker die restliche Absenkung machen lassen.
+Spricht der Dolmetscher sehr leise und der Ducker greift nicht: Schwelle senken.
 Doppelklick auf einen Wert setzt ihn auf den Standard zurück.
 
-Die Pegelmeter zeigen die Eingänge und den fertigen Mix je Stream (Balken = RMS, Strich = Spitze).
+### Pegelanzeigen
+
+Alle Pegel haben eine dB-Skala (−60 bis 0 dB). Die **blaue Linie bei −14 dB** ist der Zielpegel –
+die **Summe** jedes Streams sollte im Mittel dort liegen. Balken = RMS (Durchschnittspegel),
+weißer Strich = Spitze. Grün bis −10 dB, gelb bis −4 dB, darüber rot.
 Ein Limiter am Ende verhindert Übersteuerung.
 
 ### Lippensynchronität

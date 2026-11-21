@@ -22,16 +22,27 @@ from .devices import list_dshow_devices, resolve_ffmpeg
 from .procs import EngineProcess, FFProcess
 
 STATUS_COLORS = {"off": "#888", "starting": "#d90", "running": "#2a2", "error": "#d33"}
-STRIP_WIDTH = 270
+STRIP_WIDTH = 300
 
 
 # =========================================================================== widgets
 
+TARGET_DB = -14.0  # Zielpegel, auf allen Pegelanzeigen markiert
+TARGET_COLOR = "#3aa0ff"
+
+
 class LevelMeter(QWidget):
-    """Pegelmesser −60…0 dBFS (Balken = RMS, Strich = Peak), waagerecht oder senkrecht."""
+    """Pegelmesser −60…0 dBFS mit dB-Skala (Balken = RMS, Strich = Peak).
+
+    Der Zielpegel (−14 dB) ist als blaue Linie mit Beschriftung markiert.
+    """
 
     MIN_DB = -60.0
-    ZONES = ((-60, -18, "#2c2"), (-18, -6, "#dd2"), (-6, 0, "#e33"))
+    ZONES = ((-60, -10, "#2c2"), (-10, -4, "#dd2"), (-4, 0, "#e33"))
+    SCALE = (0, -6, -14, -24, -36, -48, -60)
+    SCALE_W = 22   # Breite der Skala (senkrecht)
+    BAR_W = 14
+    SCALE_H = 14   # Höhe der Skala (waagerecht)
 
     def __init__(self, label: str = "", vertical: bool = False, parent=None):
         super().__init__(parent)
@@ -39,12 +50,13 @@ class LevelMeter(QWidget):
         self.vertical = vertical
         self.peak = self.rms = -120.0
         self._t = 0.0
+        self.setToolTip(f"Balken = RMS, weißer Strich = Spitze, blaue Linie = Ziel {TARGET_DB:.0f} dB")
         if vertical:
-            self.setFixedWidth(16)
-            self.setMinimumHeight(120)
+            self.setFixedWidth(self.SCALE_W + self.BAR_W + 2)
+            self.setMinimumHeight(140)
         else:
-            self.setMinimumHeight(18)
-            self.setMinimumWidth(120)
+            self.setMinimumHeight(18 + self.SCALE_H)
+            self.setMinimumWidth(160)
 
     def set_level(self, peak: float, rms: float) -> None:
         self.peak, self.rms, self._t = peak, rms, time.monotonic()
@@ -60,42 +72,76 @@ class LevelMeter(QWidget):
 
     def paintEvent(self, _ev):
         p = QPainter(self)
-        r = self.rect().adjusted(0, 0, -1, -1)
-        p.fillRect(r, QColor("#1b1b1b"))
-        length = r.height() if self.vertical else r.width()
-        thick = r.width() if self.vertical else r.height()
+        small = QFont(self.font())
+        small.setPointSizeF(max(6.5, small.pointSizeF() - 3))
+        p.setFont(small)
+        pal_text = self.palette().color(self.foregroundRole())
 
-        def bar(a: float, b: float, col: str):
+        if self.vertical:
+            # Skala links, Balken rechts; 6 px Rand oben/unten, damit Beschriftung passt
+            bar = QRectF(self.SCALE_W, 6, self.BAR_W, self.height() - 12)
+        else:
+            bar = QRectF(0, 0, self.width() - 1, self.height() - self.SCALE_H - 1)
+        length = bar.height() if self.vertical else bar.width()
+        p.fillRect(bar, QColor("#1b1b1b"))
+
+        def seg(a: float, b: float, col: str):
             # a, b: Anteile 0..1 entlang der Messrichtung
             if self.vertical:
-                p.fillRect(QRectF(1, r.bottom() - b * length, thick - 1, (b - a) * length), QColor(col))
+                p.fillRect(QRectF(bar.left(), bar.bottom() - b * length, bar.width(),
+                                  (b - a) * length), QColor(col))
             else:
-                p.fillRect(QRectF(a * length, 1, (b - a) * length, thick - 1), QColor(col))
+                p.fillRect(QRectF(bar.left() + a * length, bar.top(), (b - a) * length,
+                                  bar.height()), QColor(col))
 
         x = self._frac(self.rms)
         for lo, hi, col in self.ZONES:
             a, b = self._frac(lo), min(x, self._frac(hi))
             if b > a:
-                bar(a, b, col)
+                seg(a, b, col)
         if self.peak > self.MIN_DB:
             pk = self._frac(self.peak)
-            bar(max(0.0, pk - 2.0 / length), pk, "#fff")
-        p.setPen(QColor("#555"))
-        for db in (-48, -36, -24, -12, -6):
+            seg(max(0.0, pk - 2.0 / length), pk, "#fff")
+
+        # ---- Skala
+        for db in self.SCALE:
             f = self._frac(db)
+            target = db == TARGET_DB
+            p.setPen(QColor(TARGET_COLOR) if target else pal_text)
+            fb = QFont(small)
+            fb.setBold(target)
+            p.setFont(fb)
+            txt = str(db)
             if self.vertical:
-                y = int(r.bottom() - f * length)
-                p.drawLine(0, y, 3, y)
+                y = bar.bottom() - f * length
+                p.drawLine(int(bar.left()) - 3, int(y), int(bar.left()) - 1, int(y))
+                p.drawText(QRectF(0, y - 6, self.SCALE_W - 4, 12), Qt.AlignRight | Qt.AlignVCenter, txt)
             else:
-                xx = int(f * length)
-                p.drawLine(xx, r.bottom() - 3, xx, r.bottom())
+                xx = bar.left() + f * length
+                p.drawLine(int(xx), int(bar.bottom()) + 1, int(xx), int(bar.bottom()) + 2)
+                align = Qt.AlignRight if db == 0 else (Qt.AlignLeft if db == -60 else Qt.AlignHCenter)
+                left = xx - 30 if db == 0 else (xx if db == -60 else xx - 15)
+                p.drawText(QRectF(left, bar.bottom() + 3, 30, self.SCALE_H - 2),
+                           align | Qt.AlignVCenter, txt)
+
+        # ---- Ziellinie −14 dB quer über den Balken
+        f = self._frac(TARGET_DB)
+        pen = p.pen()
+        pen.setColor(QColor(TARGET_COLOR))
+        pen.setWidth(2)
+        p.setPen(pen)
+        if self.vertical:
+            y = int(bar.bottom() - f * length)
+            p.drawLine(int(bar.left()), y, int(bar.right()), y)
+        else:
+            xx = int(bar.left() + f * length)
+            p.drawLine(xx, int(bar.top()), xx, int(bar.bottom()))
+
         if not self.vertical:
             p.setPen(QColor("#ddd"))
-            f = QFont(self.font())
-            f.setPointSizeF(max(7.0, f.pointSizeF() - 1))
-            p.setFont(f)
+            p.setFont(self.font())
             txt = f"{self.label}  {self.rms:5.1f} dB" if self.rms > -120 else f"{self.label}  —"
-            p.drawText(r.adjusted(4, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, txt)
+            p.drawText(bar.adjusted(4, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, txt)
 
 
 class ChannelFader(QWidget):
@@ -350,16 +396,24 @@ class StreamStrip(QGroupBox):
 
         # ---- Ducker
         self.duck_box = QGroupBox("Ducker")
-        self.duck_box.setToolTip("Saalton automatisch absenken, solange der Dolmetscher spricht")
+        self.duck_box.setToolTip("Saalton um einen festen Wert absenken, solange der Dolmetscher spricht")
         self.duck_box.setCheckable(True)
         self.duck_box.setChecked(cfg.duck_on)
         dv = QVBoxLayout(self.duck_box)
         dv.setSpacing(2)
+        self.duck_led = QLabel()
+        self.duck_led.setAlignment(Qt.AlignRight)
+        dv.addWidget(self.duck_led)
+        self.set_ducking(False)
+        self.depth_s = ParamSlider("Absenkung", 0, 40, 1, "dB", cfg.duck_db, 15)
+        self.depth_s.setToolTip("Um so viele dB wird der Saalton leiser, wenn der Dolmetscher spricht")
         self.thr_s = ParamSlider("Schwelle", -60, 0, 1, "dB", cfg.threshold_db, -36)
-        self.ratio_s = ParamSlider("Stärke", 1, 20, 0.5, ":1", cfg.ratio, 10)
-        self.att_s = ParamSlider("Attack", 1, 500, 1, "ms", cfg.attack_ms, 20)
+        self.thr_s.setToolTip("Ab diesem Dolmetscher-Pegel wird abgesenkt")
+        self.att_s = ParamSlider("Attack", 1, 1000, 1, "ms", cfg.attack_ms, 30)
+        self.att_s.setToolTip("Wie schnell abgesenkt wird")
         self.rel_s = ParamSlider("Release", 50, 3000, 10, "ms", cfg.release_ms, 600)
-        for w in (self.thr_s, self.ratio_s, self.att_s, self.rel_s):
+        self.rel_s.setToolTip("Wie schnell der Saalton zurückkommt, wenn der Dolmetscher pausiert")
+        for w in (self.depth_s, self.thr_s, self.att_s, self.rel_s):
             dv.addWidget(w)
         v.addWidget(self.duck_box)
 
@@ -396,7 +450,7 @@ class StreamStrip(QGroupBox):
         self.master_f.changed.connect(lambda x: self._set("master_db", x))
         self.duck_box.toggled.connect(lambda b: self._set("duck_on", b))
         self.thr_s.changed.connect(lambda x: self._set("threshold_db", x))
-        self.ratio_s.changed.connect(lambda x: self._set("ratio", x))
+        self.depth_s.changed.connect(lambda x: self._set("duck_db", x))
         self.att_s.changed.connect(lambda x: self._set("attack_ms", x))
         self.rel_s.changed.connect(lambda x: self._set("release_ms", x))
         self.target_btn.clicked.connect(self._edit_target)
@@ -411,6 +465,20 @@ class StreamStrip(QGroupBox):
     def decay(self) -> None:
         for w in (self.floor_f, self.voice_f, self.master_f):
             w.decay()
+        if self.voice_f.meter.rms <= -120:
+            self.set_ducking(False)
+
+    def set_ducking(self, active: bool) -> None:
+        if active:
+            self.duck_led.setText(f"<b style='color:#e80'>● senkt um {self.cfg.duck_db:.0f} dB</b>")
+        else:
+            self.duck_led.setText("<span style='color:#888'>○ aus</span>")
+
+    def update_ducking(self, voice_rms: float) -> None:
+        """Anzeige, ob gerade abgesenkt wird (aus dem Dolmetscher-Pegel vor dem Fader)."""
+        key = voice_rms - self.cfg.voice_db
+        self.set_ducking(self.cfg.duck_on and self.cfg.voice != VOICE_NONE
+                         and voice_rms > -120 and key >= self.cfg.threshold_db)
 
     def set_labels(self, labels: Dict[str, str]) -> None:
         self.voice_combo.blockSignals(True)
@@ -976,6 +1044,8 @@ class MainWindow(QMainWindow):
                     w = self.strips[i].meter_for(key[0])
                     if w is not None:
                         w.set_level(peak, rms)
+                    if key[0] == "v":
+                        self.strips[i].update_ducking(rms)
 
     def _decay(self):
         for m in self.in_meters.values():

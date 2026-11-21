@@ -40,7 +40,7 @@ def main() -> int:
     time.sleep(4)
 
     cfg.streams[1].voice = "right"
-    cfg.streams[1].ratio = 20
+    cfg.streams[1].duck_db = 20
     sent = 0
     for t, c, v in stream_params(1, cfg.streams[1]):
         eng.stdin.write(command_line(t, c, v).encode())

@@ -24,10 +24,10 @@ class StreamConfig:
     voice_db: float = 0.0    # Pegel Dolmetscher
     master_db: float = 0.0   # Summenpegel
     duck_on: bool = True
-    threshold_db: float = -36.0  # ab hier duckt der Saalton
-    ratio: float = 10.0          # 1..20 (höher = stärker absenken)
-    attack_ms: float = 20.0
-    release_ms: float = 600.0
+    threshold_db: float = -36.0  # ab diesem Dolmetscher-Pegel wird gesenkt
+    duck_db: float = 15.0        # um so viele dB wird der Saalton gesenkt
+    attack_ms: float = 30.0      # Zeit bis zur vollen Absenkung
+    release_ms: float = 600.0    # Zeit bis der Saalton wieder voll da ist
 
 
 @dataclass

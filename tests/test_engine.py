@@ -51,9 +51,14 @@ class Params(unittest.TestCase):
         self.assertEqual(p[("volume@selL2", "volume")], "0")
         self.assertEqual(p[("volume@selR2", "volume")], "1")
 
-    def test_ducker_off_means_ratio_1(self):
-        p = {(t, c): v for t, c, v in eng.stream_params(0, StreamConfig(duck_on=False, ratio=12))}
-        self.assertEqual(p[("sidechaincompress@duck0", "ratio")], "1")
+    def test_ducker_off_means_no_subtraction(self):
+        p = {(t, c): v for t, c, v in eng.stream_params(0, StreamConfig(duck_on=False, duck_db=12))}
+        self.assertEqual(p[("volume@depth0", "volume")], "0")
+
+    def test_duck_depth(self):
+        # Saalton · (1 + g) muss der gewünschten Absenkung entsprechen
+        for db in (6, 15, 30):
+            self.assertAlmostEqual(1 + eng.duck_depth_gain(db), eng.db_to_lin(-db))
 
     def test_threshold_clamped(self):
         self.assertAlmostEqual(eng.threshold_lin(-90), 0.000977)
@@ -121,15 +126,20 @@ class Preview(unittest.TestCase):
 class ConfigRoundtrip(unittest.TestCase):
     def test_roundtrip(self):
         cfg = AppConfig()
-        cfg.streams[1].ratio = 15
+        cfg.streams[1].duck_db = 22
         cfg.engine.video_device = "Cam"
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "c.json"
             save_config(cfg, p)
             back = load_config(p)
-        self.assertEqual(back.streams[1].ratio, 15)
+        self.assertEqual(back.streams[1].duck_db, 22)
         self.assertEqual(back.engine.video_device, "Cam")
         self.assertEqual(len(back.streams), 3)
+
+    def test_old_config_with_ratio_still_loads(self):
+        cfg = AppConfig.from_dict({"streams": [{"name": "Alt", "ratio": 10, "voice": "left"}]})
+        self.assertEqual(cfg.streams[0].name, "Alt")
+        self.assertEqual(cfg.streams[0].duck_db, 15.0)
 
 
 @unittest.skipUnless(FFMPEG, "ffmpeg nicht installiert")
@@ -155,6 +165,40 @@ class FfmpegGraph(unittest.TestCase):
         res = subprocess.run(cmd, capture_output=True, timeout=60)
         self.assertEqual(res.returncode, 0, res.stderr.decode(errors="replace"))
         self.assertIn(b"sid=s3", res.stdout)
+
+    def test_ducker_lowers_by_exact_db(self):
+        """Saalton = konstanter Ton, Dolmetscher spricht 0–2 s, schweigt 2–4 s.
+        Gemessen wird der Saalton-Pegel (f0) nach dem Ducker."""
+        cfg = AppConfig()
+        cfg.engine.test_mode = True
+        cfg.engine.preview = False
+        cfg.streams = [StreamConfig(voice=VOICE_LEFT, duck_db=12, attack_ms=10, release_ms=50),
+                       # ohne Dolmetscher (Steuersignal = exakte Stille): nie absenken
+                       StreamConfig(voice="none", duck_db=12, attack_ms=10, release_ms=50)]
+        fc = eng.build_filter_graph(cfg)
+        inputs = ["-f", "lavfi", "-i", "color=s=64x36:r=5:d=4",
+                  "-f", "lavfi", "-i", "aevalsrc=0.5*sin(2*PI*300*t)|0.5*sin(2*PI*300*t):s=48000:d=4",
+                  "-f", "lavfi", "-i",
+                  "aevalsrc=0.3*sin(2*PI*700*t)*lt(t\\,2)|0:s=48000:c=stereo:d=4"]
+        res = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", *inputs,
+                              "-filter_complex", fc, "-map", "[vout]", "-map", "[a0]",
+                              "-map", "[a1]", "-f", "null", "-"], capture_output=True, timeout=60)
+        self.assertEqual(res.returncode, 0, res.stderr.decode(errors="replace"))
+        levels = {"f0": [], "f1": []}
+        cur = {}
+        for line in res.stdout.decode().splitlines():
+            if line.startswith("lavfi.astats.Overall.RMS_level="):
+                cur["rms"] = float(line.split("=", 1)[1])
+            elif line.startswith("sid=") and line[4:] in levels:
+                levels[line[4:]].append(cur["rms"])
+        f0, f1 = levels["f0"], levels["f1"]
+        # Blöcke à 0,1 s: 0,5–1,5 s = Dolmetscher spricht, 2,5–3,5 s = Stille
+        ducked = sum(f0[5:15]) / 10
+        normal = sum(f0[25:35]) / 10
+        self.assertAlmostEqual(normal - ducked, 12.0, delta=0.3)
+        # Stream ohne Dolmetscher bleibt immer auf vollem Saalton-Pegel
+        self.assertAlmostEqual(min(f1[2:38]), normal, delta=0.3)
+        self.assertAlmostEqual(max(f1[2:38]), normal, delta=0.3)
 
 
 if __name__ == "__main__":

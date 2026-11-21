@@ -36,8 +36,19 @@ def fmt(x: float) -> str:
 
 
 def threshold_lin(db: float) -> float:
-    # sidechaincompress erlaubt 0.000976563 .. 1
     return min(1.0, max(0.000977, db_to_lin(db)))
+
+
+def duck_depth_gain(duck_db: float, on: bool = True) -> float:
+    """Gewicht des abgezogenen Saalton-Anteils.
+
+    Ducker = Saalton − (1 − 10^(−dB/20)) · Saalton · Gate.  Spricht der Dolmetscher (Gate offen),
+    bleibt exakt Saalton · 10^(−dB/20) übrig – also eine feste Absenkung um duck_db,
+    unabhängig davon, wie laut der Dolmetscher ist.
+    """
+    if not on or duck_db <= 0:
+        return 0.0
+    return -(1.0 - db_to_lin(-duck_db))
 
 
 # --------------------------------------------------------------------------- live params
@@ -52,10 +63,10 @@ def stream_params(i: int, s: StreamConfig) -> List[Tuple[str, str, str]]:
         (f"volume@voice{i}", "volume", fmt(db_to_lin(s.voice_db))),
         (f"volume@floor{i}", "volume", fmt(db_to_lin(s.floor_db))),
         (f"volume@master{i}", "volume", fmt(db_to_lin(s.master_db))),
-        (f"sidechaincompress@duck{i}", "threshold", fmt(threshold_lin(s.threshold_db))),
-        (f"sidechaincompress@duck{i}", "ratio", fmt(s.ratio if s.duck_on else 1.0)),
-        (f"sidechaincompress@duck{i}", "attack", fmt(max(0.01, s.attack_ms))),
-        (f"sidechaincompress@duck{i}", "release", fmt(max(0.01, s.release_ms))),
+        (f"sidechaingate@duck{i}", "threshold", fmt(threshold_lin(s.threshold_db))),
+        (f"sidechaingate@duck{i}", "attack", fmt(max(0.01, s.attack_ms))),
+        (f"sidechaingate@duck{i}", "release", fmt(max(0.01, s.release_ms))),
+        (f"volume@depth{i}", "volume", fmt(duck_depth_gain(s.duck_db, s.duck_on))),
     ]
 
 
@@ -132,7 +143,8 @@ def build_filter_graph(cfg: AppConfig) -> str:
 
     for i, s in enumerate(cfg.streams):
         p = {(t, c): v for t, c, v in stream_params(i, s)}
-        duck = f"sidechaincompress@duck{i}"
+        duck = f"sidechaingate@duck{i}"
+        depth = f"volume@depth{i}"
         # Bei aktiven Pegelmetern wird hinter Saalton- und Dolmetscher-Fader abgegriffen
         tap_v = f",asplit=2[vo{i}][mv{i}]" if m else f"[vo{i}]"
         tap_f = f",asplit=2[fo{i}][mf{i}]" if m else f"[fo{i}]"
@@ -143,9 +155,16 @@ def build_filter_graph(cfg: AppConfig) -> str:
             f"[sl{i}][sr{i}]amix=inputs=2:normalize=0:dropout_transition=0,asplit=2[k{i}][v{i}]",
             f"[v{i}]volume@voice{i}={p[(f'volume@voice{i}', 'volume')]},"
             f"pan=stereo|c0=c0|c1=c0,{AFMT}" + tap_v,
-            f"[f{i}][k{i}]{duck}=threshold={p[(duck, 'threshold')]}:ratio={p[(duck, 'ratio')]}"
+            # Ducker mit fester Absenkung: Gate (geöffnet, solange der Dolmetscher spricht)
+            # lässt einen Saalton-Anteil durch, der vom Saalton abgezogen wird.
+            # +1e-7 (−140 dB): bei exakter digitaler Stille bliebe das Gate sonst offen
+            # und der Saalton dauerhaft abgesenkt (z.B. stummgeschalteter Dolmetscherkanal).
+            f"[k{i}]pan=stereo|c0=c0|c1=c0,aeval=val(ch)+0.0000001:c=same[ks{i}]",
+            f"[f{i}]asplit=2[fa{i}][fb{i}]",
+            f"[fb{i}][ks{i}]{duck}=threshold={p[(duck, 'threshold')]}:ratio=9000:range=0:knee=1"
             f":attack={p[(duck, 'attack')]}:release={p[(duck, 'release')]}"
-            f":detection=rms:link=maximum[fd{i}]",
+            f":detection=rms:link=maximum,{depth}={p[(depth, 'volume')]}[sub{i}]",
+            f"[fa{i}][sub{i}]amix=inputs=2:normalize=0:dropout_transition=0[fd{i}]",
             f"[fd{i}]volume@floor{i}={p[(f'volume@floor{i}', 'volume')]}" + tap_f,
             f"[fo{i}][vo{i}]amix=inputs=2:normalize=0:dropout_transition=0,"
             f"volume@master{i}={p[(f'volume@master{i}', 'volume')]},"
