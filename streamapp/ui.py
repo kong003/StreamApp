@@ -1,15 +1,18 @@
-"""Hauptfenster."""
+"""Hauptfenster: links eine Spalte je Stream (Pegel/Fader/Ducker), rechts die Videovorschau."""
 from __future__ import annotations
 
 import time
 from typing import Callable, Dict, List
+from urllib.parse import urlparse
 
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+from PySide6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter,
+    QVBoxLayout, QWidget,
 )
 
 from . import engine as eng
@@ -19,22 +22,29 @@ from .devices import list_dshow_devices, resolve_ffmpeg
 from .procs import EngineProcess, FFProcess
 
 STATUS_COLORS = {"off": "#888", "starting": "#d90", "running": "#2a2", "error": "#d33"}
+STRIP_WIDTH = 270
 
 
 # =========================================================================== widgets
 
 class LevelMeter(QWidget):
-    """Horizontaler Pegelmesser −60…0 dBFS (Balken = RMS, Strich = Peak)."""
+    """Pegelmesser −60…0 dBFS (Balken = RMS, Strich = Peak), waagerecht oder senkrecht."""
 
     MIN_DB = -60.0
+    ZONES = ((-60, -18, "#2c2"), (-18, -6, "#dd2"), (-6, 0, "#e33"))
 
-    def __init__(self, label: str = "", parent=None):
+    def __init__(self, label: str = "", vertical: bool = False, parent=None):
         super().__init__(parent)
         self.label = label
+        self.vertical = vertical
         self.peak = self.rms = -120.0
         self._t = 0.0
-        self.setMinimumHeight(18)
-        self.setMinimumWidth(120)
+        if vertical:
+            self.setFixedWidth(16)
+            self.setMinimumHeight(120)
+        else:
+            self.setMinimumHeight(18)
+            self.setMinimumWidth(120)
 
     def set_level(self, peak: float, rms: float) -> None:
         self.peak, self.rms, self._t = peak, rms, time.monotonic()
@@ -45,37 +55,112 @@ class LevelMeter(QWidget):
             self.peak = self.rms = -120.0
             self.update()
 
-    def _x(self, db: float, w: float) -> float:
-        return max(0.0, min(1.0, (db - self.MIN_DB) / -self.MIN_DB)) * w
+    def _frac(self, db: float) -> float:
+        return max(0.0, min(1.0, (db - self.MIN_DB) / -self.MIN_DB))
 
     def paintEvent(self, _ev):
         p = QPainter(self)
         r = self.rect().adjusted(0, 0, -1, -1)
-        p.fillRect(r, QColor("#222"))
-        w = r.width()
-        x = self._x(self.rms, w)
-        if x > 0:
-            for lo, hi, col in ((-60, -18, "#2c2"), (-18, -6, "#dd2"), (-6, 0, "#e33")):
-                a, b = self._x(lo, w), min(x, self._x(hi, w))
-                if b > a:
-                    p.fillRect(QRectF(a, 1, b - a, r.height() - 1), QColor(col))
+        p.fillRect(r, QColor("#1b1b1b"))
+        length = r.height() if self.vertical else r.width()
+        thick = r.width() if self.vertical else r.height()
+
+        def bar(a: float, b: float, col: str):
+            # a, b: Anteile 0..1 entlang der Messrichtung
+            if self.vertical:
+                p.fillRect(QRectF(1, r.bottom() - b * length, thick - 1, (b - a) * length), QColor(col))
+            else:
+                p.fillRect(QRectF(a * length, 1, (b - a) * length, thick - 1), QColor(col))
+
+        x = self._frac(self.rms)
+        for lo, hi, col in self.ZONES:
+            a, b = self._frac(lo), min(x, self._frac(hi))
+            if b > a:
+                bar(a, b, col)
         if self.peak > self.MIN_DB:
-            px = self._x(self.peak, w)
-            p.fillRect(QRectF(px - 1, 1, 2, r.height() - 1), QColor("#fff"))
+            pk = self._frac(self.peak)
+            bar(max(0.0, pk - 2.0 / length), pk, "#fff")
         p.setPen(QColor("#555"))
         for db in (-48, -36, -24, -12, -6):
-            gx = self._x(db, w)
-            p.drawLine(int(gx), r.bottom() - 3, int(gx), r.bottom())
-        p.setPen(QColor("#ddd"))
-        f = QFont(self.font())
-        f.setPointSizeF(max(7.0, f.pointSizeF() - 1))
-        p.setFont(f)
-        txt = f"{self.label}  {self.rms:5.1f} dB" if self.rms > -120 else f"{self.label}  —"
-        p.drawText(r.adjusted(4, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, txt)
+            f = self._frac(db)
+            if self.vertical:
+                y = int(r.bottom() - f * length)
+                p.drawLine(0, y, 3, y)
+            else:
+                xx = int(f * length)
+                p.drawLine(xx, r.bottom() - 3, xx, r.bottom())
+        if not self.vertical:
+            p.setPen(QColor("#ddd"))
+            f = QFont(self.font())
+            f.setPointSizeF(max(7.0, f.pointSizeF() - 1))
+            p.setFont(f)
+            txt = f"{self.label}  {self.rms:5.1f} dB" if self.rms > -120 else f"{self.label}  —"
+            p.drawText(r.adjusted(4, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, txt)
+
+
+class ChannelFader(QWidget):
+    """Senkrechter Fader mit Pegelanzeige daneben (wie am Mischpult)."""
+
+    changed = Signal(float)
+
+    def __init__(self, title: str, value: float, lo=-60.0, hi=12.0, parent=None):
+        super().__init__(parent)
+        self.meter = LevelMeter(vertical=True)
+        self.slider = QSlider(Qt.Vertical)
+        self.slider.setRange(int(lo * 2), int(hi * 2))  # 0,5-dB-Schritte
+        self.slider.setTickPosition(QSlider.TicksLeft)
+        self.slider.setTickInterval(12)  # alle 6 dB
+        self.slider.setMinimumHeight(120)
+        self.title = QLabel(title)
+        self.title.setAlignment(Qt.AlignCenter)
+        self.title.setStyleSheet("font-weight:bold")
+        self.value_label = QLabel()
+        self.value_label.setAlignment(Qt.AlignCenter)
+        self.value_label.setToolTip("Doppelklick: 0 dB")
+        self.value_label.mouseDoubleClickEvent = lambda _e: self.set_value(0.0, emit=True)
+        self.level_label = QLabel("—")
+        self.level_label.setAlignment(Qt.AlignCenter)
+        self.level_label.setStyleSheet("color:#888; font-size:10px")
+        lay = QGridLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setHorizontalSpacing(4)
+        lay.addWidget(self.title, 0, 0, 1, 2)
+        lay.addWidget(self.slider, 1, 0, Qt.AlignHCenter)
+        lay.addWidget(self.meter, 1, 1)
+        lay.addWidget(self.value_label, 2, 0, 1, 2)
+        lay.addWidget(self.level_label, 3, 0, 1, 2)
+        lay.setRowStretch(1, 1)
+        self.slider.valueChanged.connect(self._on_change)
+        self.set_value(value)
+
+    def value(self) -> float:
+        return self.slider.value() / 2.0
+
+    def set_value(self, v: float, emit: bool = False) -> None:
+        self.slider.blockSignals(not emit)
+        self.slider.setValue(round(v * 2))
+        self.slider.blockSignals(False)
+        self._update_label()
+
+    def set_level(self, peak: float, rms: float) -> None:
+        self.meter.set_level(peak, rms)
+        self.level_label.setText(f"{rms:.0f} dB" if rms > -120 else "—")
+
+    def decay(self) -> None:
+        self.meter.decay()
+        if self.meter.rms <= -120:
+            self.level_label.setText("—")
+
+    def _update_label(self):
+        self.value_label.setText(f"{self.value():+.1f} dB")
+
+    def _on_change(self, _):
+        self._update_label()
+        self.changed.emit(self.value())
 
 
 class ParamSlider(QWidget):
-    """Schieberegler mit Beschriftung und Wertanzeige. Doppelklick auf Wert = Standard."""
+    """Kompakter waagerechter Regler mit Wertanzeige. Doppelklick auf Wert = Standard."""
 
     changed = Signal(float)
 
@@ -86,16 +171,17 @@ class ParamSlider(QWidget):
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(round(lo / step), round(hi / step))
         self.value_label = QLabel()
-        self.value_label.setMinimumWidth(64)
+        self.value_label.setMinimumWidth(58)
         self.value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.value_label.setToolTip("Doppelklick: Standardwert")
         self.value_label.mouseDoubleClickEvent = lambda _e: self.set_value(self._default, emit=True)
-        lay = QGridLayout(self)
+        title_label = QLabel(title)
+        title_label.setMinimumWidth(58)
+        lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setVerticalSpacing(0)
-        lay.addWidget(QLabel(title), 0, 0)
-        lay.addWidget(self.value_label, 0, 1)
-        lay.addWidget(self.slider, 1, 0, 1, 2)
+        lay.addWidget(title_label)
+        lay.addWidget(self.slider, 1)
+        lay.addWidget(self.value_label)
         self.slider.valueChanged.connect(self._on_change)
         self.set_value(value)
 
@@ -118,6 +204,105 @@ class ParamSlider(QWidget):
         self.changed.emit(self.value())
 
 
+class VideoPreview(QWidget):
+    """Zeigt das zuletzt empfangene Vorschaubild (Seitenverhältnis bleibt erhalten)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pix: QPixmap | None = None
+        self._t = 0.0
+        self.message = "Keine Vorschau – Engine starten"
+        self.setMinimumSize(320, 180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_jpeg(self, data: bytes) -> None:
+        pix = QPixmap()
+        if pix.loadFromData(data, "JPG"):
+            self._pix, self._t = pix, time.monotonic()
+            self.update()
+
+    def check_stale(self) -> None:
+        if self._pix is not None and time.monotonic() - self._t > 2.0:
+            self._pix = None
+            self.update()
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor("#000"))
+        if self._pix is None:
+            p.setPen(QColor("#777"))
+            p.drawText(self.rect(), Qt.AlignCenter, self.message)
+            return
+        scaled = self._pix.size().scaled(self.size(), Qt.KeepAspectRatio)
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.drawPixmap(x, y, scaled.width(), scaled.height(), self._pix)
+
+
+class PreviewReceiver(QTcpServer):
+    """Lokaler TCP-Server, zu dem sich die Engine mit dem MJPEG-Vorschaustream verbindet."""
+
+    frame = Signal(bytes)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._sock: QTcpSocket | None = None
+        self._parser = eng.MjpegParser()
+        self.newConnection.connect(self._on_conn)
+
+    def start(self, port: int) -> bool:
+        if self.isListening():
+            if self.serverPort() == port:
+                return True
+            self.close()
+        return self.listen(QHostAddress.LocalHost, port)
+
+    def _on_conn(self):
+        while self.hasPendingConnections():
+            sock = self.nextPendingConnection()
+            if self._sock is not None:
+                self._sock.abort()
+                self._sock.deleteLater()
+            self._sock = sock
+            self._parser = eng.MjpegParser()
+            sock.readyRead.connect(lambda s=sock: self._on_data(s))
+
+    def _on_data(self, sock: QTcpSocket):
+        if sock is not self._sock:
+            return
+        for jpg in self._parser.feed(bytes(sock.readAll())):
+            self.frame.emit(jpg)
+
+
+# =========================================================================== dialogs
+
+class TargetDialog(QDialog):
+    """RTMP-URL und Schlüssel eines Streams bearbeiten."""
+
+    def __init__(self, cfg: StreamConfig, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Ziel – {cfg.name}")
+        self.setMinimumWidth(520)
+        f = QFormLayout(self)
+        self.url = QLineEdit(cfg.url)
+        self.url.setPlaceholderText("rtmp://a.rtmp.youtube.com/live2")
+        self.key = QLineEdit(cfg.key)
+        self.key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.key.setPlaceholderText("Streamschlüssel (wird an die URL angehängt)")
+        f.addRow("RTMP-URL", self.url)
+        f.addRow("Schlüssel", self.key)
+        hint = QLabel("Der Schlüssel wird mit „/“ an die URL angehängt. "
+                      "Steht er schon in der URL, Feld leer lassen.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#888")
+        f.addRow(hint)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+
 # =========================================================================== stream strip
 
 class StreamStrip(QGroupBox):
@@ -131,95 +316,108 @@ class StreamStrip(QGroupBox):
         super().__init__(parent)
         self.index = index
         self.cfg = cfg
-        self.setMinimumWidth(300)
-        self.setMaximumWidth(380)
+        self.setFixedWidth(STRIP_WIDTH)
         v = QVBoxLayout(self)
+        v.setSpacing(6)
 
         top = QHBoxLayout()
         self.name_edit = QLineEdit(cfg.name)
         self.name_edit.setFont(QFont(self.font().family(), self.font().pointSize() + 2, QFont.Bold))
         self.remove_btn = QPushButton("✕")
-        self.remove_btn.setFixedWidth(28)
+        self.remove_btn.setFixedWidth(26)
         self.remove_btn.setToolTip("Stream entfernen")
         top.addWidget(self.name_edit)
         top.addWidget(self.remove_btn)
         v.addLayout(top)
 
-        form = QFormLayout()
-        self.url_edit = QLineEdit(cfg.url)
-        self.url_edit.setPlaceholderText("rtmp://server/app")
-        self.key_edit = QLineEdit(cfg.key)
-        self.key_edit.setEchoMode(QLineEdit.PasswordEchoOnEdit)
-        self.key_edit.setPlaceholderText("Streamschlüssel")
         self.voice_combo = QComboBox()
-        form.addRow("RTMP-URL", self.url_edit)
-        form.addRow("Schlüssel", self.key_edit)
-        form.addRow("Sprache", self.voice_combo)
-        v.addLayout(form)
+        self.voice_combo.setToolTip("Welche Sprache dieser Stream bekommt")
+        v.addWidget(self.voice_combo)
         self.set_labels(labels)
 
-        mix = QGroupBox("Mix")
-        mv = QVBoxLayout(mix)
-        self.floor_s = ParamSlider("Saalton", -60, 12, 0.5, "dB", cfg.floor_db, 0)
-        self.voice_s = ParamSlider("Dolmetscher", -60, 12, 0.5, "dB", cfg.voice_db, 0)
-        self.master_s = ParamSlider("Summe", -30, 12, 0.5, "dB", cfg.master_db, 0)
-        for w in (self.floor_s, self.voice_s, self.master_s):
-            mv.addWidget(w)
-        v.addWidget(mix)
+        # ---- Mischpult: Saalton | Dolmetscher | Summe
+        faders = QHBoxLayout()
+        faders.setSpacing(10)
+        self.floor_f = ChannelFader("Saal", cfg.floor_db)
+        self.voice_f = ChannelFader("Dolm.", cfg.voice_db)
+        self.master_f = ChannelFader("Summe", cfg.master_db, lo=-30)
+        self.floor_f.setToolTip("Saalton (Pegel nach dem Ducker)")
+        self.voice_f.setToolTip("Dolmetscher")
+        self.master_f.setToolTip("Gesamtmix, der gesendet wird")
+        for w in (self.floor_f, self.voice_f, self.master_f):
+            faders.addWidget(w)
+        v.addLayout(faders, 1)
 
-        self.duck_box = QGroupBox("Ducker (Saalton leiser, wenn Dolmetscher spricht)")
+        # ---- Ducker
+        self.duck_box = QGroupBox("Ducker")
+        self.duck_box.setToolTip("Saalton automatisch absenken, solange der Dolmetscher spricht")
         self.duck_box.setCheckable(True)
         self.duck_box.setChecked(cfg.duck_on)
         dv = QVBoxLayout(self.duck_box)
+        dv.setSpacing(2)
         self.thr_s = ParamSlider("Schwelle", -60, 0, 1, "dB", cfg.threshold_db, -36)
-        self.ratio_s = ParamSlider("Stärke (Ratio)", 1, 20, 0.5, ": 1", cfg.ratio, 10)
+        self.ratio_s = ParamSlider("Stärke", 1, 20, 0.5, ":1", cfg.ratio, 10)
         self.att_s = ParamSlider("Attack", 1, 500, 1, "ms", cfg.attack_ms, 20)
         self.rel_s = ParamSlider("Release", 50, 3000, 10, "ms", cfg.release_ms, 600)
         for w in (self.thr_s, self.ratio_s, self.att_s, self.rel_s):
             dv.addWidget(w)
         v.addWidget(self.duck_box)
 
-        self.meter = LevelMeter("Ausgang")
-        v.addWidget(self.meter)
+        # ---- Ziel + Start
+        tgt = QHBoxLayout()
+        self.target_label = QLabel()
+        self.target_label.setStyleSheet("color:#888")
+        self.target_btn = QPushButton("Ziel…")
+        self.target_btn.setToolTip("RTMP-URL und Streamschlüssel")
+        tgt.addWidget(self.target_label, 1)
+        tgt.addWidget(self.target_btn)
+        v.addLayout(tgt)
+        self._update_target_label()
 
-        bottom = QHBoxLayout()
         self.go_btn = QPushButton("▶ Stream starten")
         self.go_btn.setCheckable(True)
-        self.go_btn.setMinimumHeight(32)
-        bottom.addWidget(self.go_btn)
-        v.addLayout(bottom)
+        self.go_btn.setMinimumHeight(34)
+        v.addWidget(self.go_btn)
         self.status_label = QLabel("Gestoppt")
         self.status_label.setWordWrap(True)
+        self.status_label.setMinimumHeight(32)
+        self.status_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         v.addWidget(self.status_label)
         self.stats_label = QLabel("")
         self.stats_label.setStyleSheet("color:#888; font-size:10px")
         v.addWidget(self.stats_label)
-        v.addStretch(1)
 
         # ---- Verbindungen
         self.name_edit.textChanged.connect(lambda t: self._set("name", t, live=False))
-        self.url_edit.textChanged.connect(lambda t: self._set("url", t.strip(), live=False))
-        self.key_edit.textChanged.connect(lambda t: self._set("key", t.strip(), live=False))
         self.voice_combo.currentIndexChanged.connect(
             lambda _i: self._set("voice", self.voice_combo.currentData()))
-        self.floor_s.changed.connect(lambda x: self._set("floor_db", x))
-        self.voice_s.changed.connect(lambda x: self._set("voice_db", x))
-        self.master_s.changed.connect(lambda x: self._set("master_db", x))
+        self.floor_f.changed.connect(lambda x: self._set("floor_db", x))
+        self.voice_f.changed.connect(lambda x: self._set("voice_db", x))
+        self.master_f.changed.connect(lambda x: self._set("master_db", x))
         self.duck_box.toggled.connect(lambda b: self._set("duck_on", b))
         self.thr_s.changed.connect(lambda x: self._set("threshold_db", x))
         self.ratio_s.changed.connect(lambda x: self._set("ratio", x))
         self.att_s.changed.connect(lambda x: self._set("attack_ms", x))
         self.rel_s.changed.connect(lambda x: self._set("release_ms", x))
+        self.target_btn.clicked.connect(self._edit_target)
         self.go_btn.clicked.connect(self._on_go)
         self.remove_btn.clicked.connect(lambda: self.remove_clicked.emit(self.index))
         self._update_enabled()
+
+    # Pegel-IDs aus der Engine: f<i> Saal, v<i> Dolmetscher, s<i> Summe
+    def meter_for(self, prefix: str) -> ChannelFader | None:
+        return {"f": self.floor_f, "v": self.voice_f, "s": self.master_f}.get(prefix)
+
+    def decay(self) -> None:
+        for w in (self.floor_f, self.voice_f, self.master_f):
+            w.decay()
 
     def set_labels(self, labels: Dict[str, str]) -> None:
         self.voice_combo.blockSignals(True)
         self.voice_combo.clear()
         self.voice_combo.addItem("Nur Saalton (Original)", VOICE_NONE)
-        self.voice_combo.addItem(f"{labels['left']} (Dolmetscher links)", VOICE_LEFT)
-        self.voice_combo.addItem(f"{labels['right']} (Dolmetscher rechts)", VOICE_RIGHT)
+        self.voice_combo.addItem(f"{labels['left']} (Dolm. links)", VOICE_LEFT)
+        self.voice_combo.addItem(f"{labels['right']} (Dolm. rechts)", VOICE_RIGHT)
         self.voice_combo.setCurrentIndex(max(0, self.voice_combo.findData(self.cfg.voice)))
         self.voice_combo.blockSignals(False)
 
@@ -233,8 +431,25 @@ class StreamStrip(QGroupBox):
 
     def _update_enabled(self) -> None:
         has_voice = self.cfg.voice != VOICE_NONE
-        self.voice_s.setEnabled(has_voice)
+        self.voice_f.setEnabled(has_voice)
         self.duck_box.setEnabled(has_voice)
+
+    def _update_target_label(self) -> None:
+        if not self.cfg.url:
+            self.target_label.setText("<i>kein Ziel</i>")
+            return
+        host = urlparse(self.cfg.url).netloc or self.cfg.url
+        key = " 🔑" if self.cfg.key else ""
+        self.target_label.setText(host + key)
+        self.target_label.setToolTip(self.cfg.url)
+
+    def _edit_target(self) -> None:
+        dlg = TargetDialog(self.cfg, self)
+        if dlg.exec() == QDialog.Accepted:
+            self.cfg.url = dlg.url.text().strip()
+            self.cfg.key = dlg.key.text().strip()
+            self._update_target_label()
+            self.config_changed.emit()
 
     def _on_go(self, checked: bool) -> None:
         (self.start_clicked if checked else self.stop_clicked).emit(self.index)
@@ -242,12 +457,15 @@ class StreamStrip(QGroupBox):
     def set_running_wanted(self, wanted: bool) -> None:
         self.go_btn.setChecked(wanted)
         self.go_btn.setText("■ Stream stoppen" if wanted else "▶ Stream starten")
-        for w in (self.url_edit, self.key_edit, self.remove_btn):
-            w.setEnabled(not wanted)
+        self.target_btn.setEnabled(not wanted)
+        self.remove_btn.setEnabled(not wanted)
 
     def set_status(self, state: str, text: str) -> None:
-        self.status_label.setText(f"<b style='color:{STATUS_COLORS.get(state, '#888')}'>●</b> {text}")
-        if state != "running":
+        col = STATUS_COLORS.get(state, "#888")
+        self.status_label.setText(f"<b style='color:{col}'>●</b> {text}")
+        live = state == "running"
+        self.go_btn.setStyleSheet("background:#2a7a2a; color:white" if live else "")
+        if not live:
             self.stats_label.setText("")
 
 
@@ -267,6 +485,7 @@ class SettingsPage(QWidget):
         self.log = log
         e = cfg.engine
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         outer.addWidget(scroll)
@@ -356,16 +575,15 @@ class SettingsPage(QWidget):
         self.meters_cb = QCheckBox("Pegelmeter anzeigen")
         self.meters_cb.setChecked(e.meters)
         f.addRow(self.meters_cb)
+        self.preview_cb = QCheckBox("Videovorschau anzeigen")
+        self.preview_cb.setChecked(e.preview)
+        f.addRow(self.preview_cb)
+        self.preview_port = self._spin(1024, 65000, e.preview_port, "")
+        f.addRow("Vorschau-Port (TCP)", self.preview_port)
         show_cmd = QPushButton("Engine-Befehl im Log anzeigen")
         show_cmd.clicked.connect(self._show_cmd)
         f.addRow(show_cmd)
         lay.addWidget(g)
-
-        note = QLabel("Änderungen auf dieser Seite werden beim nächsten Engine-Start wirksam. "
-                      "Pegel und Ducker auf der Mixer-Seite wirken sofort.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color:#888")
-        lay.addWidget(note)
         lay.addStretch(1)
 
         for w in (self.ff_edit, self.vsize_edit, self.vfps_edit):
@@ -377,9 +595,10 @@ class SettingsPage(QWidget):
         for w in (self.res_combo, self.fps_combo, self.enc_combo):
             w.currentIndexChanged.connect(self._apply)
         self.preset_combo.currentTextChanged.connect(self._apply)
-        for w in (self.floor_delay, self.interp_delay, self.vbr, self.abr, self.port_spin):
+        for w in (self.floor_delay, self.interp_delay, self.vbr, self.abr, self.port_spin,
+                  self.preview_port):
             w.valueChanged.connect(self._apply)
-        for w in (self.test_cb, self.meters_cb):
+        for w in (self.test_cb, self.meters_cb, self.preview_cb):
             w.toggled.connect(self._apply)
         self._update_resolved()
 
@@ -430,6 +649,7 @@ class SettingsPage(QWidget):
             QApplication.restoreOverrideCursor()
         if not video and not audio:
             self.log("Keine DirectShow-Geräte gefunden (nur unter Windows verfügbar, ffmpeg-Pfad prüfen).")
+            QMessageBox.information(self, "Geräte", "Keine Geräte gefunden. ffmpeg-Pfad prüfen.")
             return
         for combo, devs in ((self.video_combo, video), (self.floor_combo, audio),
                             (self.interp_combo, audio)):
@@ -454,6 +674,8 @@ class SettingsPage(QWidget):
         e.ffmpeg_path = self.ff_edit.text().strip() or "ffmpeg"
         e.test_mode = self.test_cb.isChecked()
         e.meters = self.meters_cb.isChecked()
+        e.preview = self.preview_cb.isChecked()
+        e.preview_port = self.preview_port.value()
         e.video_device = self._combo_ident(self.video_combo)
         e.floor_device = self._combo_ident(self.floor_combo)
         e.interp_device = self._combo_ident(self.interp_combo)
@@ -488,6 +710,32 @@ class SettingsPage(QWidget):
         self.log(self.ffmpeg() + " " + " ".join(quoted))
 
 
+class SettingsDialog(QDialog):
+    def __init__(self, page: SettingsPage, locked: bool, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Einstellungen")
+        self.resize(640, 720)
+        lay = QVBoxLayout(self)
+        if locked:
+            note = QLabel("Die Engine läuft – Einstellungen können nur bei gestoppter Engine "
+                          "geändert werden.")
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#d90; font-weight:bold")
+            lay.addWidget(note)
+        else:
+            note = QLabel("Änderungen gelten beim nächsten Engine-Start. "
+                          "Fader und Ducker wirken dagegen sofort.")
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#888")
+            lay.addWidget(note)
+        page.setEnabled(not locked)
+        lay.addWidget(page, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(self.accept)
+        bb.accepted.connect(self.accept)
+        lay.addWidget(bb)
+
+
 # =========================================================================== main window
 
 class MainWindow(QMainWindow):
@@ -495,15 +743,22 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.cfg = cfg
         self.setWindowTitle("StreamApp – Mehrsprachiges RTMP-Streaming")
-        self.resize(1280, 860)
+        self.resize(1600, 900)
 
         self.engine = EngineProcess(self)
         self.engine.status.connect(self._on_engine_status)
         self.engine.log.connect(self.log)
         self.engine.stats.connect(lambda s: self.engine_stats.setText(s))
         self.engine.meters.connect(self._on_meters)
+        self.preview_rx = PreviewReceiver(self)
         self.relays: List[FFProcess] = []
         self.strips: List[StreamStrip] = []
+
+        # Einstellungen leben in einem Dialog, die Seite wird wiederverwendet
+        self.log_view = QPlainTextEdit()
+        self.settings = SettingsPage(cfg, self.log)
+        self.settings.changed.connect(self._schedule_save)
+        self.settings.labels_changed.connect(self._update_labels)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -521,56 +776,69 @@ class MainWindow(QMainWindow):
         self.all_btn.clicked.connect(self._start_all)
         self.none_btn = QPushButton("Alle Streams stoppen")
         self.none_btn.clicked.connect(self._stop_all)
+        self.settings_btn = QPushButton("⚙ Einstellungen")
+        self.settings_btn.clicked.connect(self._open_settings)
+        self.log_btn = QPushButton("Log")
+        self.log_btn.setCheckable(True)
         head.addWidget(self.engine_btn)
         head.addWidget(self.engine_status, 1)
-        head.addWidget(self.all_btn)
-        head.addWidget(self.none_btn)
+        for b in (self.all_btn, self.none_btn, self.settings_btn, self.log_btn):
+            head.addWidget(b)
         root.addLayout(head)
+
+        # ---- Hauptbereich: links Stream-Spalten, rechts Video
+        main_split = QSplitter(Qt.Horizontal)
+
+        self.strip_scroll = QScrollArea()
+        self.strip_scroll.setWidgetResizable(True)
+        self.strip_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.strip_host = QWidget()
+        self.strip_layout = QHBoxLayout(self.strip_host)
+        self.strip_layout.setContentsMargins(0, 0, 0, 0)
+        self.strip_layout.setAlignment(Qt.AlignLeft)
+        self.add_btn = QPushButton("+\nStream")
+        self.add_btn.setFixedWidth(56)
+        self.add_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.add_btn.clicked.connect(self._add_stream)
+        self.strip_scroll.setWidget(self.strip_host)
+        main_split.addWidget(self.strip_scroll)
+
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        self.preview = VideoPreview()
+        rv.addWidget(self.preview, 1)
         self.engine_stats = QLabel()
         self.engine_stats.setStyleSheet("color:#888; font-size:10px")
-        root.addWidget(self.engine_stats)
-
-        self.tabs = QTabWidget()
-        split = QSplitter(Qt.Vertical)
-        split.addWidget(self.tabs)
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(2000)
-        split.addWidget(self.log_view)
-        split.setSizes([680, 140])
-        root.addWidget(split, 1)
-
-        # ---- Mixer-Seite
-        mixer = QWidget()
-        mv = QVBoxLayout(mixer)
+        rv.addWidget(self.engine_stats)
         inputs = QGroupBox("Eingänge")
-        il = QHBoxLayout(inputs)
+        il = QVBoxLayout(inputs)
         self.in_meters = {"in_floor": LevelMeter("Saalton"), "in_il": LevelMeter(""),
                           "in_ir": LevelMeter("")}
         for m in self.in_meters.values():
             il.addWidget(m)
-        mv.addWidget(inputs)
-        self.strip_scroll = QScrollArea()
-        self.strip_scroll.setWidgetResizable(True)
-        self.strip_host = QWidget()
-        self.strip_layout = QHBoxLayout(self.strip_host)
-        self.strip_layout.setAlignment(Qt.AlignLeft)
-        self.strip_scroll.setWidget(self.strip_host)
-        mv.addWidget(self.strip_scroll, 1)
-        self.add_btn = QPushButton("+ Stream hinzufügen")
-        self.add_btn.clicked.connect(self._add_stream)
-        mv.addWidget(self.add_btn, 0, Qt.AlignLeft)
-        self.tabs.addTab(mixer, "Mixer")
+        rv.addWidget(inputs)
+        main_split.addWidget(right)
+        main_split.setStretchFactor(0, 0)
+        main_split.setStretchFactor(1, 1)
+        self.main_split = main_split
 
-        self.settings = SettingsPage(cfg, self.log)
-        self.settings.changed.connect(self._schedule_save)
-        self.settings.labels_changed.connect(self._update_labels)
-        self.tabs.addTab(self.settings, "Einstellungen")
+        vsplit = QSplitter(Qt.Vertical)
+        vsplit.addWidget(main_split)
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(2000)
+        vsplit.addWidget(self.log_view)
+        vsplit.setStretchFactor(0, 1)
+        self.log_view.setVisible(False)
+        self.log_btn.toggled.connect(self.log_view.setVisible)
+        root.addWidget(vsplit, 1)
+
+        self.preview_rx.frame.connect(self.preview.set_jpeg)
 
         self._save_timer = QTimer(self, singleShot=True, interval=800)
         self._save_timer.timeout.connect(lambda: save_config(self.cfg))
         self._decay_timer = QTimer(self, interval=300)
-        self._decay_timer.timeout.connect(self._decay_meters)
+        self._decay_timer.timeout.connect(self._decay)
         self._decay_timer.start()
 
         self._rebuild_strips()
@@ -580,6 +848,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ helpers
     def log(self, text: str) -> None:
         self.log_view.appendPlainText(time.strftime("%H:%M:%S ") + text)
+        if "Start: " not in text and ("Fehler" in text or "rror" in text):
+            self.log_btn.setStyleSheet("color:#d33; font-weight:bold")
 
     def _schedule_save(self):
         self._save_timer.start()
@@ -590,15 +860,22 @@ class MainWindow(QMainWindow):
 
     def _update_labels(self):
         lb = self._labels()
-        self.in_meters["in_il"].label = f"L: {lb['left']}"
-        self.in_meters["in_ir"].label = f"R: {lb['right']}"
+        self.in_meters["in_il"].label = f"Dolm. L: {lb['left']}"
+        self.in_meters["in_ir"].label = f"Dolm. R: {lb['right']}"
         for m in self.in_meters.values():
             m.update()
         for s in self.strips:
             s.set_labels(lb)
 
+    def _open_settings(self):
+        dlg = SettingsDialog(self.settings, locked=self.engine.wanted, parent=self)
+        dlg.exec()
+        self.settings.setParent(None)  # Seite für das nächste Öffnen behalten
+        save_config(self.cfg)
+
     # ------------------------------------------------------------------ strips
     def _rebuild_strips(self):
+        self.strip_layout.removeWidget(self.add_btn)
         for s in self.strips:
             s.setParent(None)
             s.deleteLater()
@@ -617,9 +894,13 @@ class MainWindow(QMainWindow):
             self.strips.append(strip)
             relay = FFProcess(sc.name, self)
             relay.status.connect(lambda st, txt, s=strip: s.set_status(st, txt))
-            relay.stats.connect(lambda txt, s=strip: s.stats_label.setText(txt))
+            relay.stats.connect(lambda txt, s=strip: s.stats_label.setText(_short_stats(txt)))
             relay.log.connect(self.log)
             self.relays.append(relay)
+        self.strip_layout.addWidget(self.add_btn)
+        # Linke Seite so breit wie alle Spalten (soweit das Fenster reicht)
+        want = len(self.strips) * (STRIP_WIDTH + 8) + 80
+        self.main_split.setSizes([want, max(400, self.width() - want)])
         self._update_structure_lock()
 
     def _add_stream(self):
@@ -639,15 +920,22 @@ class MainWindow(QMainWindow):
     def _update_structure_lock(self):
         running = self.engine.wanted
         self.add_btn.setEnabled(not running)
-        self.add_btn.setToolTip("Engine stoppen, um Streams hinzuzufügen" if running else "")
+        self.add_btn.setToolTip("Engine stoppen, um Streams hinzuzufügen" if running
+                                else "Stream hinzufügen")
         for s, r in zip(self.strips, self.relays):
             s.remove_btn.setEnabled(not running and not r.wanted)
 
     # ------------------------------------------------------------------ engine
     def _toggle_engine(self, checked: bool):
         if checked:
-            self.cfg.engine.ffmpeg_path = self.settings.ff_edit.text().strip() or "ffmpeg"
+            self.settings._apply()
             save_config(self.cfg)
+            e = self.cfg.engine
+            if e.preview and not self.preview_rx.start(e.preview_port):
+                self.log(f"Vorschau-Port {e.preview_port} ist belegt – Vorschau deaktiviert "
+                         "(Port in den Einstellungen ändern).")
+            self.preview.message = "Warte auf Bild…" if e.preview else "Vorschau ausgeschaltet"
+            self.preview.update()
             self.engine.start(self.settings.ffmpeg(), self._engine_args)
         else:
             self._stop_all()
@@ -666,10 +954,12 @@ class MainWindow(QMainWindow):
         wanted = self.engine.wanted
         self.engine_btn.setChecked(wanted)
         self.engine_btn.setText("■ Engine stoppen" if wanted else "▶ Engine starten")
-        self.settings.setEnabled(not wanted)
         self.all_btn.setEnabled(wanted)
         if state in ("off", "error"):
             self.engine_stats.setText("")
+        if state == "off":
+            self.preview.message = "Keine Vorschau – Engine starten"
+            self.preview.update()
         self._update_structure_lock()
 
     def _send_live(self, i: int):
@@ -680,16 +970,19 @@ class MainWindow(QMainWindow):
         for key, (peak, rms) in levels.items():
             if key in self.in_meters:
                 self.in_meters[key].set_level(peak, rms)
-            elif key.startswith("s") and key[1:].isdigit():
+            elif key[:1] in "fvs" and key[1:].isdigit():
                 i = int(key[1:])
                 if i < len(self.strips):
-                    self.strips[i].meter.set_level(peak, rms)
+                    w = self.strips[i].meter_for(key[0])
+                    if w is not None:
+                        w.set_level(peak, rms)
 
-    def _decay_meters(self):
+    def _decay(self):
         for m in self.in_meters.values():
             m.decay()
         for s in self.strips:
-            s.meter.decay()
+            s.decay()
+        self.preview.check_stale()
 
     # ------------------------------------------------------------------ relays
     def _start_stream(self, i: int):
@@ -699,7 +992,7 @@ class MainWindow(QMainWindow):
             strip.set_running_wanted(False)
             return
         if not eng.rtmp_target(self.cfg.streams[i]):
-            QMessageBox.warning(self, "Stream", "Bitte RTMP-URL (und ggf. Schlüssel) eintragen.")
+            QMessageBox.warning(self, "Stream", "Bitte über „Ziel…“ eine RTMP-URL eintragen.")
             strip.set_running_wanted(False)
             return
         strip.set_running_wanted(True)
@@ -737,3 +1030,15 @@ class MainWindow(QMainWindow):
             if not p.waitForFinished(3000):
                 p.kill()
         ev.accept()
+
+
+def _short_stats(line: str) -> str:
+    """'frame= 91 fps= 60 ... size= 2304KiB time=00:00:03.22 bitrate=...' -> 'time · bitrate'."""
+    parts = {}
+    for key in ("time", "bitrate", "speed"):
+        idx = line.find(key + "=")
+        if idx >= 0:
+            parts[key] = line[idx + len(key) + 1:].strip().split(" ")[0]
+    if not parts:
+        return line[:60]
+    return "  ".join(f"{k} {v}" for k, v in parts.items())

@@ -40,13 +40,20 @@ Eigene **.exe** bauen: `build.bat` ausführen → `dist\StreamApp\StreamApp.exe`
 
 ## Bedienung
 
-1. **Einstellungen** → „Geräte suchen“ → Videogerät, Saalton-Gerät und Dolmetscher-Gerät wählen.
+Aufbau des Fensters: **links eine Spalte je Stream**, **rechts die Videovorschau** mit den
+Eingangspegeln darunter. Jede Stream-Spalte hat drei Fader mit Pegelanzeige:
+
+* **Saal** – Saalton *nach* dem Ducker (hier sieht man das Absenken direkt),
+* **Dolm.** – Dolmetscherkanal,
+* **Summe** – der fertige Mix, der gesendet wird.
+
+1. **⚙ Einstellungen** → „Geräte suchen“ → Videogerät, Saalton-Gerät und Dolmetscher-Gerät wählen.
    Namen für den linken/rechten Dolmetscherkanal eintragen (z.B. „Englisch“, „Französisch“).
    Ohne Hardware ausprobieren: **Testmodus** anhaken (Testbild, Rauschen als Saalton,
    abwechselnde Töne als Dolmetscher).
 2. Auflösung, Bildrate, Encoder und Bitrate einstellen. Hast du eine NVIDIA-/Intel-/AMD-Grafikkarte,
    entlastet der Hardware-Encoder die CPU deutlich.
-3. **Mixer** → pro Stream RTMP-URL + Schlüssel eintragen und die Sprache wählen.
+3. Pro Stream über **Ziel…** RTMP-URL + Schlüssel eintragen und oben die Sprache wählen.
 4. **Engine starten**, dann einzelne Streams oder „Alle Streams starten“.
 
 ### Ducker einstellen

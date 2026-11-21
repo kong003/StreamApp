@@ -86,6 +86,38 @@ class Meters(unittest.TestCase):
         self.assertEqual(out["in_il"], (-120.0, -120.0))
 
 
+class Preview(unittest.TestCase):
+    def test_mjpeg_parser_chunks(self):
+        def part(data):
+            return (b"--ffmpeg\r\nContent-type: image/jpeg\r\nContent-length: %d\r\n\r\n" % len(data)
+                    + data + b"\r\n")
+        stream = part(b"\xff\xd8AAAA\xff\xd9") + part(b"\xff\xd8BBBBBB\xff\xd9")
+        mp = eng.MjpegParser()
+        got = []
+        for i in range(0, len(stream), 7):
+            got += mp.feed(stream[i:i + 7])
+        self.assertEqual(got, [b"\xff\xd8AAAA\xff\xd9", b"\xff\xd8BBBBBB\xff\xd9"])
+
+    def test_encoder_options_only_main_video(self):
+        cfg = AppConfig()
+        cfg.engine.test_mode = True
+        args = eng.build_engine_args(cfg)
+        self.assertIn("-c:v:0", args)
+        self.assertIn("-b:v:0", args)
+        self.assertIn("-preset:v:0", args)
+        self.assertNotIn("-b:v", args)
+        self.assertIn("-c:v:1", args)
+        self.assertTrue(args[-1].endswith(f"tcp://127.0.0.1:{cfg.engine.preview_port}"))
+
+    def test_preview_off(self):
+        cfg = AppConfig()
+        cfg.engine.test_mode = True
+        cfg.engine.preview = False
+        args = eng.build_engine_args(cfg)
+        self.assertNotIn("[vprev]", args)
+        self.assertNotIn("tcp://", args[-1])
+
+
 class ConfigRoundtrip(unittest.TestCase):
     def test_roundtrip(self):
         cfg = AppConfig()

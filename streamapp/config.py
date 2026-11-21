@@ -35,6 +35,8 @@ class EngineConfig:
     ffmpeg_path: str = "ffmpeg"
     test_mode: bool = False  # Testbild + Testtöne statt Hardware
     meters: bool = True
+    preview: bool = True        # Videovorschau im Fenster
+    preview_port: int = 24500   # lokaler TCP-Port für die Vorschau
 
     video_device: str = ""
     video_input_size: str = ""   # z.B. "1920x1080"; leer = Gerätestandard

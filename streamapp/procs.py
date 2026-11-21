@@ -106,7 +106,8 @@ class FFProcess(QObject):
 
     # Harmlos: Relay steigt mitten im Datenstrom ein und wartet auf das nächste Keyframe.
     NOISE = ("non-existing PPS", "no frame!", "Last message repeated",
-             "decode_slice_header error", "Resumed reading at pts")
+             "decode_slice_header error", "Resumed reading at pts",
+             "deprecated pixel format used")
 
     def _ignore_line(self, line: str) -> bool:
         return any(n in line for n in self.NOISE)

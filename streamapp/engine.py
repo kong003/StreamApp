@@ -109,10 +109,13 @@ def build_filter_graph(cfg: AppConfig) -> str:
     e = cfg.engine
     n = len(cfg.streams)
     W, H, F = e.out_width, e.out_height, e.out_fps
-    parts: List[str] = [
-        f"[0:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
-        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={F},format=yuv420p[vout]"
-    ]
+    vchain = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
+              f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={F},format=yuv420p")
+    if e.preview:
+        vchain += f",split=2[vout][vp];[vp]scale=640:-2,fps={PREVIEW_FPS},format=yuvj420p[vprev]"
+    else:
+        vchain += "[vout]"
+    parts: List[str] = [vchain]
 
     def prep(idx: int, delay: int) -> str:
         chain = f"[{idx}:a]aresample={SR}:async=1000,{AFMT}"
@@ -130,23 +133,28 @@ def build_filter_graph(cfg: AppConfig) -> str:
     for i, s in enumerate(cfg.streams):
         p = {(t, c): v for t, c, v in stream_params(i, s)}
         duck = f"sidechaincompress@duck{i}"
+        # Bei aktiven Pegelmetern wird hinter Saalton- und Dolmetscher-Fader abgegriffen
+        tap_v = f",asplit=2[vo{i}][mv{i}]" if m else f"[vo{i}]"
+        tap_f = f",asplit=2[fo{i}][mf{i}]" if m else f"[fo{i}]"
         parts += [
             f"[il{i}]volume@selL{i}={p[(f'volume@selL{i}', 'volume')]}[sl{i}]",
             f"[ir{i}]volume@selR{i}={p[(f'volume@selR{i}', 'volume')]}[sr{i}]",
             # gewählter Dolmetscherkanal (mono) -> Schlüssel für den Ducker + Sprachweg
             f"[sl{i}][sr{i}]amix=inputs=2:normalize=0:dropout_transition=0,asplit=2[k{i}][v{i}]",
             f"[v{i}]volume@voice{i}={p[(f'volume@voice{i}', 'volume')]},"
-            f"pan=stereo|c0=c0|c1=c0,{AFMT}[vo{i}]",
+            f"pan=stereo|c0=c0|c1=c0,{AFMT}" + tap_v,
             f"[f{i}][k{i}]{duck}=threshold={p[(duck, 'threshold')]}:ratio={p[(duck, 'ratio')]}"
             f":attack={p[(duck, 'attack')]}:release={p[(duck, 'release')]}"
             f":detection=rms:link=maximum[fd{i}]",
-            f"[fd{i}]volume@floor{i}={p[(f'volume@floor{i}', 'volume')]}[fo{i}]",
+            f"[fd{i}]volume@floor{i}={p[(f'volume@floor{i}', 'volume')]}" + tap_f,
             f"[fo{i}][vo{i}]amix=inputs=2:normalize=0:dropout_transition=0,"
             f"volume@master{i}={p[(f'volume@master{i}', 'volume')]},"
             f"alimiter=limit=0.95:level=0,{AFMT}" + (f",asplit=2[a{i}][m{i}]" if m else f"[a{i}]"),
         ]
         if m:
-            parts.append(_meter_chain(f"m{i}", f"s{i}"))
+            parts += [_meter_chain(f"m{i}", f"s{i}"),     # Summe
+                      _meter_chain(f"mf{i}", f"f{i}"),    # Saalton nach Ducker + Fader
+                      _meter_chain(f"mv{i}", f"v{i}")]    # Dolmetscher nach Fader
 
     if m:
         parts += [_meter_chain("fm", "in_floor"), _meter_chain("ilm", "in_il"),
@@ -190,14 +198,69 @@ def build_engine_args(cfg: AppConfig) -> List[str]:
             "-filter_complex", build_filter_graph(cfg), "-map", "[vout]"]
     for i in range(n):
         args += ["-map", f"[a{i}]"]
-    args += _video_encoder_args(e)
+    if e.preview:
+        args += ["-map", "[vprev]"]  # = zweiter Videostream (v:1)
+    args += _only_main_video(_video_encoder_args(e))
+    if e.preview:
+        args += ["-c:v:1", "mjpeg", "-q:v:1", "6"]
     args += ["-c:a", "aac", "-b:a", f"{e.audio_bitrate_k}k", "-ar", str(SR), "-ac", "2",
              "-max_muxing_queue_size", "2048", "-f", "tee"]
     slaves = [f"[f=mpegts:select=\\'v:0,a:{i}\\':onfail=ignore]"
               f"udp://127.0.0.1:{stream_port(cfg, i)}?pkt_size=1316"
               for i in range(n)]
+    if e.preview:
+        # Die App lauscht auf diesem Port. Fällt die Vorschau aus, laufen die Streams weiter.
+        slaves.append(f"[f=mpjpeg:select=\\'v:1\\':onfail=ignore]tcp://127.0.0.1:{e.preview_port}")
     args.append("|".join(slaves))
     return args
+
+
+def _only_main_video(args: List[str]) -> List[str]:
+    """Hängt an jede Option den Stream-Bezeichner v:0 an (gilt dann nicht für die Vorschau)."""
+    out = []
+    for a in args:
+        if a.startswith("-") and len(a) > 1 and not a[1].isdigit():
+            a = a + ":0" if a.endswith(":v") else a + ":v:0"
+        out.append(a)
+    return out
+
+
+PREVIEW_FPS = 10
+
+
+class MjpegParser:
+    """Zerlegt den mpjpeg-Datenstrom (multipart) in einzelne JPEG-Bilder."""
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+
+    def feed(self, data: bytes) -> List[bytes]:
+        self._buf += data
+        frames: List[bytes] = []
+        while True:
+            head_end = self._buf.find(b"\r\n\r\n")
+            if head_end < 0:
+                if len(self._buf) > 65536:  # Müll ohne Header -> verwerfen
+                    self._buf.clear()
+                break
+            header = bytes(self._buf[:head_end]).decode("latin-1", errors="replace").lower()
+            length = None
+            for line in header.split("\r\n"):
+                if line.startswith("content-length:"):
+                    try:
+                        length = int(line.split(":", 1)[1])
+                    except ValueError:
+                        pass
+            if length is None:
+                del self._buf[:head_end + 4]
+                continue
+            start = head_end + 4
+            if len(self._buf) < start + length:
+                break
+            frames.append(bytes(self._buf[start:start + length]))
+            del self._buf[:start + length]
+        # Bei Rückstau nur das neueste Bild behalten
+        return frames[-1:] if frames else frames
 
 
 # --------------------------------------------------------------------------- relay
