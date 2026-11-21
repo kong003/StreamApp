@@ -1,4 +1,4 @@
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 try:  # wird beim Windows-Build mit dem Git-Commit erzeugt
     from ._build import BUILD
